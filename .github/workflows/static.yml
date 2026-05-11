@@ -1758,8 +1758,6 @@
 // ══════════════════════════════════════════════
 // SHARED DATABASE — يتزامن مع لوحة الأدمن عبر localStorage
 // ══════════════════════════════════════════════
-const _syncChannel = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('pcstore_sync') : null;
-
 const DEFAULT_PRODUCTS = [
   {id:1,  name:'Intel Core i9-14900K',        brand:'Intel',   category:'cpu',     socket:'LGA1700', ramType:'DDR5/DDR4', price:1899, oldPrice:2200, rating:4.9, reviews:245, icon:'🖥️', desc:'معالج من الجيل الرابع عشر، 24 نواة، 32 خيط، turbo 6.0 GHz', specs:{'النوي':'24 نواة (8P+16E)','الخيوط':'32 خيط','السرعة القصوى':'6.0 GHz','المقبس':'LGA1700','TDP':'125W','الذاكرة المدعومة':'DDR5/DDR4'}, badge:'sale', featured:true},
   {id:2,  name:'AMD Ryzen 9 7950X',            brand:'AMD',     category:'cpu',     socket:'AM5',     ramType:'DDR5',      price:2199, oldPrice:null, rating:4.8, reviews:189, icon:'🖥️', desc:'معالج AMD الأقوى للمهنيين، 16 نواة، 5.7 GHz', specs:{'النوي':'16 نواة','الخيوط':'32 خيط','السرعة القصوى':'5.7 GHz','المقبس':'AM5','TDP':'170W','الذاكرة':'DDR5'}, badge:'new', featured:true},
@@ -1785,70 +1783,98 @@ const DEFAULT_ORDERS = [
   {id:'ORD-2385', date:null, items:'Corsair DDR5 32GB',       total:479,  status:'pending',   customer:'محمد الدوسري'},
 ];
 
-// ── DB: قراءة وكتابة localStorage ──
+// ══════════════════════════════════════════════
+// SUPABASE CONFIG
+// ══════════════════════════════════════════════
+const SUPA_URL = 'https://otdamvkdhiwcdxwwchnn.supabase.co';
+const SUPA_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im90ZGFtdmtkaGl3Y2R4d3djaG5uIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg0ODg2MjksImV4cCI6MjA5NDA2NDYyOX0.BSEfoCYIwQ4LXq-o83Pq1G_52c2VvFcSVcnfqQZPOjY';
+const SB_HEADERS = { 'apikey': SUPA_KEY, 'Authorization': 'Bearer ' + SUPA_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation' };
+
+async function sbFetch(path, opts={}) {
+  const r = await fetch(SUPA_URL + path, { headers: SB_HEADERS, ...opts });
+  if (!r.ok) { const t=await r.text(); throw new Error(t); }
+  if (r.status === 204) return null;
+  return r.json();
+}
+
+// normalize product from Supabase snake_case → camelCase
+function normP(p) {
+  return {
+    id: p.id, name: p.name, brand: p.brand, category: p.category,
+    price: Number(p.price), oldPrice: p.old_price ? Number(p.old_price) : null,
+    stock: p.stock || 0, rating: Number(p.rating) || 4.5, reviews: p.reviews || 0,
+    icon: p.icon || '📦', desc: p.description || '',
+    specs: p.specs || {}, badge: p.badge || undefined,
+    featured: p.featured || false, socket: p.socket || undefined,
+    ramType: p.ram_type || undefined, image: p.image || undefined,
+    subImages: p.sub_images || undefined
+  };
+}
+function normO(o) {
+  return { id: o.id, date: o.date, items: o.items, total: Number(o.total), status: o.status, customer: o.customer };
+}
+
+// ── DB: Supabase ──
 const DB = {
-  KEY_PRODUCTS: 'pcstore_products',
-  KEY_ORDERS:   'pcstore_orders',
+  _products: DEFAULT_PRODUCTS,
+  _orders: [],
 
-  // تهيئة: إذا ما في بيانات محفوظة، احفظ الافتراضية
-  init() {
-    if (!localStorage.getItem(this.KEY_PRODUCTS)) {
-      localStorage.setItem(this.KEY_PRODUCTS, JSON.stringify(DEFAULT_PRODUCTS));
+  async init() {
+    try {
+      const [prods, orders] = await Promise.all([
+        sbFetch('/rest/v1/products?order=id.asc'),
+        sbFetch('/rest/v1/orders?order=created_at.desc')
+      ]);
+      this._products = prods.map(normP);
+      this._orders   = orders.map(normO);
+    } catch(e) {
+      console.warn('Supabase init failed, using defaults:', e.message);
+      this._products = DEFAULT_PRODUCTS;
     }
-    if (!localStorage.getItem(this.KEY_ORDERS)) {
-      // أضف تواريخ نسبية للطلبات الافتراضية
-      const d = n => { const x=new Date(); x.setDate(x.getDate()-n); return x.toISOString().slice(0,10); };
-      const orders = DEFAULT_ORDERS.map((o,i) => ({...o, date: d([3,9,18][i]||i*5)}));
-      localStorage.setItem(this.KEY_ORDERS, JSON.stringify(orders));
+  },
+
+  getProducts() { return this._products; },
+  getOrders()   { return this._orders; },
+
+  async saveOrder(order) {
+    try {
+      await sbFetch('/rest/v1/orders', {
+        method: 'POST',
+        body: JSON.stringify({
+          id: order.id, date: order.date, items: order.items,
+          total: order.total, status: order.status, customer: order.customer
+        })
+      });
+      this._orders.unshift(order);
+    } catch(e) {
+      console.error('saveOrder error:', e.message);
     }
   },
 
-  getProducts() {
-    try { return JSON.parse(localStorage.getItem(this.KEY_PRODUCTS)) || DEFAULT_PRODUCTS; }
-    catch { return DEFAULT_PRODUCTS; }
-  },
-
-  getOrders() {
-    try { return JSON.parse(localStorage.getItem(this.KEY_ORDERS)) || []; }
-    catch { return []; }
-  },
-
-  saveOrder(order) {
-    const orders = this.getOrders();
-    orders.unshift(order);
-    localStorage.setItem(this.KEY_ORDERS, JSON.stringify(orders));
+  async refreshProducts() {
+    try {
+      const prods = await sbFetch('/rest/v1/products?order=id.asc');
+      this._products = prods.map(normP);
+    } catch(e) { console.warn('refresh error:', e); }
   }
 };
 
-DB.init();
+// المنتجات تُقرأ من Supabase — init async
+let products = DB._products;
 
-// المنتجات والطلبات تُقرأ من localStorage دائماً
-let products = DB.getProducts();
-
-// ══════════════════════════════════════════════
-// مزامنة فورية مع الأدمن عبر storage event
-// يشتغل تلقائياً بمجرد أي تعديل في لوحة الأدمن
-// ══════════════════════════════════════════════
-function applySync(key) {
-  if (key === DB.KEY_PRODUCTS || key === DB.KEY_ORDERS || key === null) {
-    products = DB.getProducts();
+// مزامنة دورية كل 30 ثانية (بدل localStorage events)
+setInterval(async () => {
+  await DB.refreshProducts();
+  const prev = products.length;
+  products = DB.getProducts();
+  if (products.length !== prev) {
     currentShopProducts = [...products];
     renderFeatured();
     const activePage = document.querySelector('.page.active')?.id;
-    if (activePage === 'page-shop')    renderShop();
-    if (activePage === 'page-cart')    renderCart();
-    if (activePage === 'page-profile') renderProfile();
-    if (key === DB.KEY_PRODUCTS) showSyncBadge();
+    if (activePage === 'page-shop') renderShop();
+    showSyncBadge();
   }
-}
-
-// Tab آخر (الطريقة الأساسية)
-window.addEventListener('storage', (e) => applySync(e.key));
-
-// نفس التاب أو نفس النافذة (BroadcastChannel)
-if (_syncChannel) {
-  _syncChannel.onmessage = (e) => applySync(e.data?.key || null);
-}
+}, 30000);
 
 function showSyncBadge() {
   let badge = document.getElementById('syncBadge');
@@ -2833,9 +2859,18 @@ function sendContact() {
 }
 
 // ============================
-// INIT
+// INIT — تحميل من Supabase
 // ============================
-renderFeatured();
+(async () => {
+  await DB.init();
+  products = DB.getProducts();
+  let currentShopProductsSet = false;
+  if (typeof currentShopProducts !== 'undefined') {
+    currentShopProducts = [...products];
+    currentShopProductsSet = true;
+  }
+  renderFeatured();
+})();
 </script>
 
 </body></html>
